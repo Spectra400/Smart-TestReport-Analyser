@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="DemoSuite" tests="6" failures="4" errors="0" skipped="0">
+  <testcase classname="login" name="TC_Login_Valid" time="0.5"/>
+  <testcase classname="login" name="TC_Login_Invalid" time="0.3">
+    <failure message="AssertionError: expected True but was False">Traceback... AssertionError</failure>
+  </testcase>
+  <testcase classname="cart" name="TC_Add_To_Cart" time="1.2">
+    <failure message="ElementNotFound: Could not find element by id 'add-btn'">StackTrace... ElementNotFound</failure>
+  </testcase>
+  <testcase classname="checkout" name="TC_Checkout_Payment" time="2.1">
+    <failure message="TimeoutError: Request to payment gateway timed out after 30s">Traceback... TimeoutError</failure>
+  </testcase>
+  <testcase classname="api" name="TC_Get_Product" time="0.9">
+    <failure message="ConnectionError: Failed to connect to db.example.com:5432">Traceback... ConnectionError</failure>
+  </testcase>
+  <testcase classname="ui" name="TC_Homepage_Load" time="0.7"/>
+</testsuite>

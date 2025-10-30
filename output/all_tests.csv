@@ -1,0 +1,7 @@
+testcase,classname,time,status,message,details
+TC_Login_Valid,login,0.5,PASS,,
+TC_Login_Invalid,login,0.3,FAIL,AssertionError: expected True but was False,Traceback... AssertionError
+TC_Add_To_Cart,cart,1.2,FAIL,ElementNotFound: Could not find element by id 'add-btn',StackTrace... ElementNotFound
+TC_Checkout_Payment,checkout,2.1,FAIL,TimeoutError: Request to payment gateway timed out after 30s,Traceback... TimeoutError
+TC_Get_Product,api,0.9,FAIL,ConnectionError: Failed to connect to db.example.com:5432,Traceback... ConnectionError
+TC_Homepage_Load,ui,0.7,PASS,,
