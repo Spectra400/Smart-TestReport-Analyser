@@ -1,27 +1,30 @@
 # analyzer.py
 """
-Smart Test Report Analyzer (robust multi-XML-format support + aggressive fallback)
-
+Smart Test Report Analyzer - robust multi-XML parser + aggressive fallback
 Usage:
-  python analyzer.py -i sample_reports/test_report.xml -o output
+    python analyzer.py -i path/to/report.xml -o output_folder
 """
 
 import re
-import argparse
-from bs4 import BeautifulSoup
-import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Tuple
+from collections import Counter, defaultdict
+import pandas as pd
 
-# --- Categorization rules (ordered, extendable)
+# Try importing BeautifulSoup
+from bs4 import BeautifulSoup
+
+# ---------------------------
+# Categorization rules
+# ---------------------------
 CATEGORY_PATTERNS = [
     ("Timeout", [r"\btimeout\b", r"\btimed out\b", r"timeouterror"]),
-    ("Element not found", [r"elementnotfound", r"element not found", r"no such element", r"noelement", r"could not find element"]),
+    ("Element not found", [r"element not found", r"no such element", r"could not find element"]),
     ("Assertion", [r"assertionerror", r"\bassert\b", r"expected .* but", r"assert failed"]),
-    ("Network/Connection", [r"connectionerror", r"failed to connect", r"connection refused", r"socket.timeout", r"connection timed out"]),
-    ("Database", [r"\bdb\b", r"\bdatabase\b", r"sqlexception", r"psycopg2", r"postgres", r"mysql", r"sqlite"]),
+    ("Network/Connection", [r"connectionerror", r"failed to connect", r"connection refused", r"socket.timeout"]),
+    ("Database", [r"\bdb\b", r"\bdatabase\b", r"sqlexception", r"postgres", r"mysql", r"sqlite"]),
     ("Auth/Authorization", [r"unauthorized", r"\bauth\b", r"403", r"401", r"forbidden"]),
-    ("Timeout/Long Running", [r"long running", r"\bslow\b", r"response time", r"timed out after"]),
+    ("Performance", [r"\bslow\b", r"response time", r"timed out after"]),
 ]
 
 def categorize_message(msg: str) -> str:
@@ -29,17 +32,38 @@ def categorize_message(msg: str) -> str:
     for cat, patterns in CATEGORY_PATTERNS:
         for p in patterns:
             try:
-                if re.search(p.lower(), text):
+                if re.search(p, text):
                     return cat
             except re.error:
                 continue
     return "Other"
 
-# Heuristics for test tag names and failure child tags
+# ---------------------------
+# Parser fallback
+# ---------------------------
+def make_soup(content: str):
+    """
+    Create BeautifulSoup using best available parser.
+    Tries: lxml -> html5lib -> xml -> html.parser
+    """
+    parsers_to_try = ["lxml", "html5lib", "xml", "html.parser"]
+    for parser in parsers_to_try:
+        try:
+            soup = BeautifulSoup(content, parser)
+            if soup is not None:
+                return soup
+        except Exception:
+            continue
+    # last fallback
+    return BeautifulSoup(content, "html.parser")
+
+# ---------------------------
+# Heuristics & helpers
+# ---------------------------
 TEST_TAG_HINTS = {
-    "testcase", "test-case", "test", "testresult", "test-step", "unittestresult", "unittestresult", "testcase"
+    "testcase", "test-case", "test", "testresult", "unittestresult"
 }
-FAILURE_CHILD_TAGS = {"failure", "error", "failed", "failuremessage", "reason", "failure-message"}
+FAILURE_CHILD_TAGS = {"failure", "error", "failed", "reason", "failuremessage", "failure-message"}
 
 def is_test_tag(tag_name: str) -> bool:
     if not tag_name:
@@ -63,53 +87,53 @@ def get_status_and_message(node) -> Tuple[str, str, str]:
     """
     Return (status, message, details) for a node that represents a test (best-effort).
     """
-    # 1) Attributes that indicate status
+    # attributes indicating status
     for attr in ("result", "outcome", "status"):
         if node.has_attr(attr):
             val = node.get(attr).strip().lower()
-            if val in ("failed", "fail", "error", "failure", "failed_with_error"):
+            if val in ("failed", "fail", "error", "failure"):
                 msg = extract_text(node)
                 details = node.text or ""
-                return "FAIL", msg, details.strip()
+                return "FAIL", msg, (details or "").strip()
             if val in ("passed", "pass", "ok", "success"):
                 return "PASS", "", ""
-            if val in ("skipped", "ignored"):
+            if val in ("skipped", "ignored", "skip"):
                 return "SKIPPED", "", ""
-    # 2) Direct child tags indicating failure
+    # direct child failure tags
     for child in node.find_all(recursive=False):
-        cname = child.name.lower() if child.name else ""
+        cname = (child.name or "").lower()
         if cname in FAILURE_CHILD_TAGS:
             msg = extract_text(child) or extract_text(node)
             details = child.text or node.text or ""
-            return "FAIL", msg.strip(), details.strip()
-    # 3) Descendant failure tags (deeper)
+            return "FAIL", msg.strip(), (details or "").strip()
+    # descendant failure tags
     for tagname in FAILURE_CHILD_TAGS:
         found = node.find(tagname)
         if found:
             msg = extract_text(found) or extract_text(node)
             details = found.text or node.text or ""
-            return "FAIL", msg.strip(), details.strip()
-    # 4) Node attributes like message/reason
+            return "FAIL", msg.strip(), (details or "").strip()
+    # attribute message
     for attr in ("message", "reason", "failure"):
         if node.has_attr(attr):
             val = node.get(attr)
-            return ("FAIL", str(val).strip(), node.text.strip() if node.text else "")
-    # 5) Plain text heuristics
+            return "FAIL", str(val).strip(), (node.text or "").strip()
+    # text heuristics
     txt = (node.text or "").lower()
     if "traceback" in txt or "assertionerror" in txt or "error:" in txt:
         firstline = txt.splitlines()[0] if txt.strip() else ""
         return "FAIL", firstline.strip(), txt.strip()
-    # 6) Default: PASS (no failure evidence)
+    # default pass
     return "PASS", "", ""
 
+# ---------------------------
+# Find test nodes and extract info
+# ---------------------------
 def find_test_nodes(soup) -> List:
-    """
-    Heuristically find test-like nodes across many XML formats.
-    """
     candidates = []
-    # Common <testcase> tags
+    # common <testcase> tags
     candidates.extend(soup.find_all("testcase"))
-    # Tags with name-like attributes
+    # tags with name-like attributes or test hints
     for tag in soup.find_all():
         name_attr = tag.get("name") or tag.get("testName") or tag.get("testname") or tag.get("method") or tag.get("test")
         if name_attr:
@@ -149,19 +173,17 @@ def get_test_info(node) -> Dict:
         "details": (details or "").strip()
     }
 
+# ---------------------------
+# Inference fallbacks
+# ---------------------------
 def infer_tests_from_repeated_siblings(soup) -> List:
-    """
-    Fallback: if no test nodes are detected, detect repeated sibling tags under the root
-    and treat each repeated element as a 'test'.
-    """
     results = []
-    root = soup.find()  # first tag (top-level)
+    root = soup.find()  # first tag
     if root is None:
         return results
     child_tags = [c for c in root.find_all(recursive=False) if c.name]
     if not child_tags:
         return results
-    from collections import Counter
     counts = Counter([c.name for c in child_tags])
     repeated = {name for name, cnt in counts.items() if cnt >= 2}
     if not repeated:
@@ -204,14 +226,6 @@ def infer_tests_from_repeated_siblings(soup) -> List:
     return results
 
 def infer_tests_more_aggressive(soup) -> List[Dict]:
-    """
-    Aggressive inference: guarantee we return some test-like items from ANY XML.
-    Order of attempts:
-     1) repeated sibling tags under root (>=2 occurrences)
-     2) all direct children of root
-     3) elements at depth 2 (grandchildren of root)
-     4) any element (limited)
-    """
     results = []
     root = None
     for tag in soup.find_all():
@@ -220,7 +234,6 @@ def infer_tests_more_aggressive(soup) -> List[Dict]:
     if root is None:
         return results
 
-    from collections import Counter
     def node_to_test(node, idx):
         name = ""
         for candidate in ("name", "id", "title", "testName", "testname"):
@@ -255,7 +268,6 @@ def infer_tests_more_aggressive(soup) -> List[Dict]:
             "details": (combined_text if combined_text else "")
         }
 
-    # 1) repeated sibling tags
     child_tags = [c for c in root.find_all(recursive=False) if c.name]
     counts = Counter([c.name for c in child_tags])
     repeated = {name for name, cnt in counts.items() if cnt >= 2}
@@ -268,14 +280,12 @@ def infer_tests_more_aggressive(soup) -> List[Dict]:
         if results:
             return results
 
-    # 2) all direct children of root
     if len(child_tags) >= 2:
         for i, child in enumerate(child_tags):
             results.append(node_to_test(child, i))
         if results:
             return results
 
-    # 3) elements at depth 2 (grandchildren)
     grandchildren = []
     for c in child_tags:
         grandchildren.extend([g for g in c.find_all(recursive=False) if g.name])
@@ -285,33 +295,31 @@ def infer_tests_more_aggressive(soup) -> List[Dict]:
         if results:
             return results
 
-    # 4) final fallback: any element (limited to first 100)
     all_tags = [t for t in soup.find_all() if t.name]
     if all_tags:
         for i, t in enumerate(all_tags[:100]):
             results.append(node_to_test(t, i))
     return results
 
+# ---------------------------
+# Main parsing function
+# ---------------------------
 def parse_xml_report(path: str) -> List[Dict]:
-    """
-    Parse many different XML shapes and return list of test dicts.
-    Uses aggressive fallback to ensure something is returned for any XML.
-    """
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"File not found: {path}")
     content = p.read_text(encoding="utf-8", errors="ignore")
-    soup = BeautifulSoup(content, "lxml")
+    soup = make_soup(content)
 
-    # 1) smart heuristic test detection
-    nodes = find_test_nodes(soup)
     results = []
+    # 1) smart heuristic detection
+    nodes = find_test_nodes(soup)
     if nodes:
         for node in nodes:
             results.append(get_test_info(node))
         return results
 
-    # 2) testsuite children heuristic
+    # 2) testsuite children
     testsuite = soup.find("testsuite")
     if testsuite:
         for tc in testsuite.find_all(recursive=False):
@@ -320,42 +328,48 @@ def parse_xml_report(path: str) -> List[Dict]:
         if results:
             return results
 
-    # 3) infer from repeated siblings (less aggressive)
+    # 3) repeated sibling inference
     inferred = infer_tests_from_repeated_siblings(soup)
     if inferred:
         return inferred
 
-    # 4) AGGRESSIVE fallback
+    # 4) aggressive fallback
     aggressive = infer_tests_more_aggressive(soup)
     if aggressive:
         return aggressive
 
-    # 5) nothing found
     return results
 
+# ---------------------------
+# Summarize & save
+# ---------------------------
 def summarize_and_save(results: List[Dict], out_dir: str):
     df = pd.DataFrame(results)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
-    df.to_csv(Path(out_dir)/"all_tests.csv", index=False)
-    fails = df[df["status"].isin(["FAIL", "ERROR"])].copy()
+    df.to_csv(Path(out_dir) / "all_tests.csv", index=False)
+    fails = df[df["status"].str.upper().isin(["FAIL", "ERROR"])].copy() if not df.empty else df
     if fails.empty:
         print("No failures found.")
         return
     fails["category"] = (fails["message"].fillna("") + " " + fails["details"].fillna("")).apply(categorize_message)
-    fails.to_csv(Path(out_dir)/"failure_details.csv", index=False)
+    fails.to_csv(Path(out_dir) / "failure_details.csv", index=False)
     summary = fails.groupby("category").size().reset_index(name="count").sort_values("count", ascending=False)
-    summary.to_csv(Path(out_dir)/"failure_summary.csv", index=False)
+    summary.to_csv(Path(out_dir) / "failure_summary.csv", index=False)
     print(f"Saved {len(fails)} failures. Summary:\n{summary.to_string(index=False)}")
 
+# ---------------------------
+# CLI entrypoint
+# ---------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Smart Test Report Analyzer (multi-XML support)")
+    import argparse
+    parser = argparse.ArgumentParser(description="Smart Test Report Analyzer")
     parser.add_argument("--input", "-i", required=True, help="Path to XML report file")
-    parser.add_argument("--out", "-o", default="output", help="Output folder for CSV")
+    parser.add_argument("--out", "-o", default="output", help="Output folder for CSV files")
     args = parser.parse_args()
 
     results = parse_xml_report(args.input)
     if not results:
-        print("No test cases detected in file. Please verify the file format.")
+        print("No test cases detected in file.")
         return
     summarize_and_save(results, args.out)
 
