@@ -1,5 +1,5 @@
+streamlit
 beautifulsoup4==4.12.2
-pandas==2.2.2
-matplotlib==3.8.1
-streamlit==1.30.0
+pandas
+matplotlib
 html5lib
