@@ -4,6 +4,7 @@
 
 Smart Test Report Analyzer is a Streamlit-powered web app that helps QA engineers and developers analyze automated test result XML files (JUnit, PyTest, TestNG, etc.) with ease.  
 It automatically detects pass/fail patterns, extracts insights, and visualizes test outcomes in seconds.
+Project live https://smart-testreport-analyser-xqe5swnansrs9urfxdmygq.streamlit.app/
 
 ---
 
